@@ -71,8 +71,8 @@ def hent_værdata(lat: float, lon: float) -> Optional[Dict]:
         return None
 
 
-def hent_farevarsler(lat: float, lon: float) -> Optional[Dict]:
-    """Henter farevarsler fra Met.no MetAlerts API"""
+def hent_farevarsler_norge() -> Optional[Dict]:
+    """Henter farevarsler fra Met.no MetAlerts API for hele Norge"""
     url = "https://api.met.no/weatherapi/metalerts/2.0/current.json"
     
     try:
@@ -80,7 +80,7 @@ def hent_farevarsler(lat: float, lon: float) -> Optional[Dict]:
         response.raise_for_status()
         data = response.json()
         
-        # Filtrer varsler som gjelder for lokasjon
+        # Filtrer varsler som gjelder for Norge
         relevante_varsler = []
         sett_varsler = set()  # For å unngå duplikater
         
@@ -88,8 +88,8 @@ def hent_farevarsler(lat: float, lon: float) -> Optional[Dict]:
             for feature in data["features"]:
                 props = feature.get("properties", {})
                 
-                # Sjekk om varslet gjelder for Norge (Norge har county-koder)
-                if props.get("county"):
+                # Sjekk om varslet gjelder for Norge
+                if props.get("county") or props.get("MunicipalityId"):
                     # Lag en unik nøkkel for varselet
                     varsel_id = f"{props.get('event', '')}_{props.get('severity', '')}_{props.get('onset', '')}"
                     
@@ -179,7 +179,7 @@ def analyser_temperatur(værdata: Dict) -> Dict[str, any]:
 
 
 def send_slack_varsel(melding: str, lokasjon: str, alvorlighetsgrad: str = "warning"):
-    """Sender varsel til Slack via webhook"""
+    """Sender varsel til Slack via webhook med knapp til Met.no"""
     
     color_map = {
         "danger": "#ff0000",
@@ -187,11 +187,52 @@ def send_slack_varsel(melding: str, lokasjon: str, alvorlighetsgrad: str = "warn
         "good": "#00ff00"
     }
     
+    # Finn koordinater for lokasjonen
+    lat, lon = None, None
+    for loc in LOCATIONS:
+        if loc["name"] == lokasjon:
+            lat = loc["lat"]
+            lon = loc["lon"]
+            break
+    
+    # Lag lenke til Met.no værvarsel
+    metno_url = None
+    if lat and lon:
+        metno_url = f"https://www.yr.no/nb/v%C3%A6rvarsel/daglig-tabell/{lat},{lon}"
+    
+    # Bygg Slack-melding med blocks
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*⚠️ Værvarsel: {lokasjon}*\n\n{melding}"
+            }
+        }
+    ]
+    
+    # Legg til knapper hvis vi har lenke
+    if metno_url:
+        blocks.append({
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Se værvarsel på yr.no",
+                        "emoji": True
+                    },
+                    "url": metno_url,
+                    "style": "primary"
+                }
+            ]
+        })
+    
     payload = {
         "attachments": [{
             "color": color_map.get(alvorlighetsgrad, "#ffaa00"),
-            "title": f"⚠️ Værvarsel: {lokasjon}",
-            "text": melding,
+            "blocks": blocks,
             "footer": "Met.no Værvarsel",
             "ts": int(time.time())
         }]
@@ -214,7 +255,6 @@ def sjekk_lokasjon(lokasjon: Dict):
     print(f"\n📍 Sjekker {navn}...")
     
     varsler = []
-    har_farevarsler = False
     forecast_info = ""
     
     # Hent værdata
@@ -254,73 +294,87 @@ def sjekk_lokasjon(lokasjon: Dict):
                     f"(forskjell: {temp['sving_24t']:.1f}°C neste 24t)"
                 )
     
-    # Hent farevarsler
-    farevarsler = hent_farevarsler(lat, lon)
-    if farevarsler and farevarsler.get("features"):
-        har_farevarsler = True
-        
-        # Oversett og formater farevarsler
-        event_emoji = {
-            "gale": "💨",
-            "wind": "🌬️", 
-            "rain": "🌧️",
-            "snow": "❄️",
-            "ice": "🧊",
-            "icing": "🧊",
-            "avalanches": "⚠️",
-            "forestfire": "🔥",
-            "flood": "🌊",
-            "lightning": "⚡"
-        }
-        
-        severity_map = {
-            "Extreme": "🔴 Ekstrem",
-            "Severe": "🟠 Alvorlig",
-            "Moderate": "🟡 Moderat",
-            "Minor": "🟢 Mindre"
-        }
-        
-        for varsel in farevarsler["features"]:
-            props = varsel.get("properties", {})
-            hendelse = props.get("event", "Ukjent hendelse")
-            beskrivelse = props.get("description", "")
-            alvorlighet = props.get("severity", "")
-            
-            # Få emoji for hendelse
-            emoji = event_emoji.get(hendelse.lower(), "⚠️")
-            severity_text = severity_map.get(alvorlighet, alvorlighet)
-            
-            # Oversett hendelser
-            hendelse_norsk = {
-                "gale": "Sterk vind/kuling",
-                "wind": "Vind", 
-                "rain": "Kraftig regn",
-                "snow": "Kraftig snø",
-                "ice": "Is/glatt",
-                "icing": "Ising",
-                "avalanches": "Snøskredfare",
-                "forestfire": "Skogbrannfare",
-                "flood": "Flom",
-                "lightning": "Lyn"
-            }.get(hendelse.lower(), hendelse)
-            
-            varsel_tekst = f"{emoji} *{hendelse_norsk}* ({severity_text})"
-            if beskrivelse:
-                varsel_tekst += f"\n   _{beskrivelse}_"
-            
-            varsler.append(varsel_tekst)
-    
-    # Send varsler til Slack
+    # Send varsler til Slack hvis det er noen
     if varsler:
         # Legg til forecast info på slutten
         if forecast_info:
             varsler.append(forecast_info)
         
         melding = "\n\n".join(varsler)
-        alvorlighetsgrad = "danger" if har_farevarsler else "warning"
-        send_slack_varsel(melding, navn, alvorlighetsgrad)
+        send_slack_varsel(melding, navn, "warning")
     else:
         print(f"  ✓ Ingen varsler for {navn}")
+
+
+def send_farevarsler_norge():
+    """Sender farevarsler for hele Norge (kun én gang)"""
+    print(f"\n⚠️ Sjekker farevarsler for Norge...")
+    
+    farevarsler = hent_farevarsler_norge()
+    if not farevarsler or not farevarsler.get("features"):
+        print(f"  ✓ Ingen farevarsler")
+        return
+    
+    varsler = []
+    
+    # Oversett og formater farevarsler
+    event_emoji = {
+        "gale": "💨",
+        "wind": "🌬️", 
+        "rain": "🌧️",
+        "snow": "❄️",
+        "ice": "🧊",
+        "icing": "🧊",
+        "avalanches": "⚠️",
+        "forestfire": "🔥",
+        "flood": "🌊",
+        "lightning": "⚡"
+    }
+    
+    severity_map = {
+        "Extreme": "🔴 Ekstrem",
+        "Severe": "🟠 Alvorlig",
+        "Moderate": "🟡 Moderat",
+        "Minor": "🟢 Mindre"
+    }
+    
+    for varsel in farevarsler["features"]:
+        props = varsel.get("properties", {})
+        hendelse = props.get("event", "Ukjent hendelse")
+        beskrivelse = props.get("description", "")
+        alvorlighet = props.get("severity", "")
+        omrade = props.get("area", "")
+        
+        # Få emoji for hendelse
+        emoji = event_emoji.get(hendelse.lower(), "⚠️")
+        severity_text = severity_map.get(alvorlighet, alvorlighet)
+        
+        # Oversett hendelser
+        hendelse_norsk = {
+            "gale": "Sterk vind/kuling",
+            "wind": "Vind", 
+            "rain": "Kraftig regn",
+            "snow": "Kraftig snø",
+            "ice": "Is/glatt",
+            "icing": "Ising",
+            "avalanches": "Snøskredfare",
+            "forestfire": "Skogbrannfare",
+            "flood": "Flom",
+            "lightning": "Lyn"
+        }.get(hendelse.lower(), hendelse)
+        
+        varsel_tekst = f"{emoji} *{hendelse_norsk}* ({severity_text})"
+        if omrade:
+            varsel_tekst += f"\n   _Område: {omrade}_"
+        if beskrivelse:
+            varsel_tekst += f"\n   _{beskrivelse}_"
+        
+        varsler.append(varsel_tekst)
+    
+    # Send alle farevarsler samlet
+    if varsler:
+        melding = "\n\n".join(varsler)
+        send_slack_varsel(melding, "Norge - Farevarsler", "danger")
 
 
 def main():
@@ -334,6 +388,11 @@ def main():
         print("\n⚠️ ADVARSEL: Husk å sette SLACK_WEBHOOK_URL i scriptet!")
         return
     
+    # Send farevarsler for Norge først (kun én gang)
+    send_farevarsler_norge()
+    time.sleep(1)
+    
+    # Deretter sjekk værvarsler per lokasjon
     for lokasjon in LOCATIONS:
         sjekk_lokasjon(lokasjon)
         time.sleep(1)  # Vær høflig mot API-et
