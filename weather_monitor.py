@@ -268,7 +268,7 @@ def sjekk_lokasjon(lokasjon: Dict):
             "ice": "🧊",
             "icing": "🧊",
             "avalanches": "⚠️",
-            "forestFire": "🔥",
+            "forestfire": "🔥",
             "flood": "🌊",
             "lightning": "⚡"
         }
@@ -299,7 +299,7 @@ def sjekk_lokasjon(lokasjon: Dict):
                 "ice": "Is/glatt",
                 "icing": "Ising",
                 "avalanches": "Snøskredfare",
-                "forestFire": "Skogbrannfare",
+                "forestfire": "Skogbrannfare",
                 "flood": "Flom",
                 "lightning": "Lyn"
             }.get(hendelse.lower(), hendelse)
