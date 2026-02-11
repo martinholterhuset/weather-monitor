@@ -45,8 +45,8 @@ LOCATIONS = [
 # Terskelverdier for varsling
 THRESHOLDS = {
     "nedbør_mm_per_time": float(os.getenv("THRESHOLD_PRECIPITATION_HOURLY", "5.0")),
-    "nedbør_mm_per_dag": float(os.getenv("THRESHOLD_PRECIPITATION_DAILY", "30.0")),
-    "temp_sving_grader": float(os.getenv("THRESHOLD_TEMPERATURE_SWING", "15.0")),
+    "nedbør_mm_per_dag": float(os.getenv("THRESHOLD_PRECIPITATION_DAILY", "20.0")),
+    "temp_sving_grader": float(os.getenv("THRESHOLD_TEMPERATURE_SWING", "10.0")),
 }
 
 # User-Agent er påkrevd av Met.no API
