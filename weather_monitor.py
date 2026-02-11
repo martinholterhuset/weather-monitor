@@ -26,11 +26,20 @@ except ImportError:
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "DIN_SLACK_WEBHOOK_URL_HER")
 
 # Legg til dine destinasjoner med navn, breddegrad og lengdegrad
+# Romerike-kommuner
 LOCATIONS = [
-    {"name": "Oslo", "lat": 59.9139, "lon": 10.7522},
-    {"name": "Bergen", "lat": 60.3913, "lon": 5.3221},
-    {"name": "Trondheim", "lat": 63.4305, "lon": 10.3951},
-    {"name": "Grimstad", "lat": 58.3405, "lon": 8.5933},
+    {"name": "Aurskog-Høland", "lat": 59.8831, "lon": 11.5617},
+    {"name": "Eidsvoll", "lat": 60.3345, "lon": 11.2525},
+    {"name": "Enebakk", "lat": 59.7631, "lon": 11.1542},
+    {"name": "Hurdal", "lat": 60.4674, "lon": 11.0514},
+    {"name": "Gjerdrum", "lat": 60.0833, "lon": 11.0333},
+    {"name": "Lillestrøm", "lat": 59.9500, "lon": 11.2000},
+    {"name": "Lørenskog", "lat": 59.9294, "lon": 10.9574},
+    {"name": "Nannestad", "lat": 60.2261, "lon": 11.0236},
+    {"name": "Nes (Akershus)", "lat": 60.1333, "lon": 11.4667},
+    {"name": "Nittedal", "lat": 60.0500, "lon": 10.8667},
+    {"name": "Ullensaker", "lat": 60.1333, "lon": 11.1667},
+    {"name": "Rælingen", "lat": 59.9333, "lon": 11.0833},
 ]
 
 # Terskelverdier for varsling
@@ -95,50 +104,77 @@ def hent_farevarsler(lat: float, lon: float) -> Optional[Dict]:
         return None
 
 
-def analyser_nedbør(værdata: Dict) -> Dict[str, float]:
-    """Analyserer nedbørsmengder fra værdata"""
+def analyser_nedbør(værdata: Dict) -> Dict[str, any]:
+    """Analyserer nedbørsmengder fra værdata - ser på alle tilgjengelige data"""
     timeseries = værdata.get("properties", {}).get("timeseries", [])
     
     max_nedbør_time = 0.0
-    total_nedbør_24t = 0.0
+    total_nedbør = 0.0
+    timer_med_data = 0
     
-    now = datetime.utcnow()
-    
-    for i, entry in enumerate(timeseries[:24]):  # Se på neste 24 timer
+    # Gå gjennom ALLE tilgjengelige timepunkter (vanligvis 48-90 timer)
+    for entry in timeseries:
         details = entry.get("data", {}).get("next_1_hours", {}).get("details", {})
         nedbør = details.get("precipitation_amount", 0.0)
         
-        max_nedbør_time = max(max_nedbør_time, nedbør)
-        total_nedbør_24t += nedbør
+        if nedbør is not None:
+            max_nedbør_time = max(max_nedbør_time, nedbør)
+            total_nedbør += nedbør
+            timer_med_data += 1
+    
+    # Beregn også 24-timers total for sammenligning
+    total_nedbør_24t = 0.0
+    for entry in timeseries[:24]:
+        details = entry.get("data", {}).get("next_1_hours", {}).get("details", {})
+        nedbør = details.get("precipitation_amount", 0.0)
+        if nedbør is not None:
+            total_nedbør_24t += nedbør
     
     return {
         "max_per_time": max_nedbør_time,
-        "total_24t": total_nedbør_24t
+        "total_24t": total_nedbør_24t,
+        "total_periode": total_nedbør,
+        "timer_dekket": timer_med_data
     }
 
 
-def analyser_temperatur(værdata: Dict) -> Dict[str, float]:
-    """Analyserer temperatursvingninger"""
+def analyser_temperatur(værdata: Dict) -> Dict[str, any]:
+    """Analyserer temperatursvingninger - ser på alle tilgjengelige data"""
     timeseries = værdata.get("properties", {}).get("timeseries", [])
     
-    temperaturer = []
-    for entry in timeseries[:24]:  # Neste 24 timer
+    temperaturer_alle = []
+    temperaturer_24t = []
+    
+    # Samle alle temperaturer
+    for i, entry in enumerate(timeseries):
         instant = entry.get("data", {}).get("instant", {}).get("details", {})
         temp = instant.get("air_temperature")
         if temp is not None:
-            temperaturer.append(temp)
+            temperaturer_alle.append(temp)
+            if i < 24:
+                temperaturer_24t.append(temp)
     
-    if not temperaturer:
-        return {"min": 0, "max": 0, "sving": 0}
+    if not temperaturer_alle:
+        return {"min": 0, "max": 0, "sving": 0, "min_24t": 0, "max_24t": 0, "sving_24t": 0, "timer_dekket": 0}
     
-    min_temp = min(temperaturer)
-    max_temp = max(temperaturer)
+    # Beregn for hele perioden
+    min_temp = min(temperaturer_alle)
+    max_temp = max(temperaturer_alle)
     sving = max_temp - min_temp
+    
+    # Beregn for 24 timer
+    min_temp_24t = min(temperaturer_24t) if temperaturer_24t else 0
+    max_temp_24t = max(temperaturer_24t) if temperaturer_24t else 0
+    sving_24t = max_temp_24t - min_temp_24t if temperaturer_24t else 0
     
     return {
         "min": min_temp,
         "max": max_temp,
-        "sving": sving
+        "sving": sving,
+        "min_24t": min_temp_24t,
+        "max_24t": max_temp_24t,
+        "sving_24t": sving_24t,
+        "timer_dekket": len(temperaturer_alle)
     }
 
 
@@ -179,25 +215,44 @@ def sjekk_lokasjon(lokasjon: Dict):
     
     varsler = []
     har_farevarsler = False
+    forecast_info = ""
     
     # Hent værdata
     værdata = hent_værdata(lat, lon)
     if værdata:
         # Sjekk nedbør
         nedbør = analyser_nedbør(værdata)
+        timer_dekket = nedbør.get("timer_dekket", 0)
+        forecast_info = f"📊 _Varsel dekker neste {timer_dekket} timer_"
+        
         if nedbør["max_per_time"] >= THRESHOLDS["nedbør_mm_per_time"]:
-            varsler.append(f"🌧️ *Kraftig nedbør:* {nedbør['max_per_time']:.1f} mm/time")
+            varsler.append(f"🌧️ *Kraftig nedbør:* opptil {nedbør['max_per_time']:.1f} mm/time")
         
         if nedbør["total_24t"] >= THRESHOLDS["nedbør_mm_per_dag"]:
-            varsler.append(f"🌧️ *Mye nedbør:* {nedbør['total_24t']:.1f} mm neste 24 timer")
+            varsler.append(f"🌧️ *Mye nedbør:* {nedbør['total_24t']:.1f} mm neste 24t")
+        
+        # Vis også total nedbør over hele perioden hvis betydelig
+        if nedbør["total_periode"] > nedbør["total_24t"] * 1.5:  # Mer enn 50% ekstra
+            varsler.append(f"🌧️ *Total nedbør ({timer_dekket}t):* {nedbør['total_periode']:.1f} mm")
         
         # Sjekk temperatur
         temp = analyser_temperatur(værdata)
-        if temp["sving"] >= THRESHOLDS["temp_sving_grader"]:
-            varsler.append(
-                f"🌡️ *Store temperatursvingninger:* {temp['min']:.1f}°C → {temp['max']:.1f}°C "
-                f"(forskjell: {temp['sving']:.1f}°C)"
-            )
+        
+        # Bruk den største svingningen (24t eller hele perioden)
+        max_sving = max(temp["sving_24t"], temp["sving"])
+        if max_sving >= THRESHOLDS["temp_sving_grader"]:
+            if temp["sving"] > temp["sving_24t"]:
+                # Stor sving over hele perioden
+                varsler.append(
+                    f"🌡️ *Store temperatursvingninger:* {temp['min']:.1f}°C → {temp['max']:.1f}°C "
+                    f"(forskjell: {temp['sving']:.1f}°C over {temp['timer_dekket']}t)"
+                )
+            else:
+                # Stor sving i første 24t
+                varsler.append(
+                    f"🌡️ *Store temperatursvingninger:* {temp['min_24t']:.1f}°C → {temp['max_24t']:.1f}°C "
+                    f"(forskjell: {temp['sving_24t']:.1f}°C neste 24t)"
+                )
     
     # Hent farevarsler
     farevarsler = hent_farevarsler(lat, lon)
@@ -257,6 +312,10 @@ def sjekk_lokasjon(lokasjon: Dict):
     
     # Send varsler til Slack
     if varsler:
+        # Legg til forecast info på slutten
+        if forecast_info:
+            varsler.append(forecast_info)
+        
         melding = "\n\n".join(varsler)
         alvorlighetsgrad = "danger" if har_farevarsler else "warning"
         send_slack_varsel(melding, navn, alvorlighetsgrad)
