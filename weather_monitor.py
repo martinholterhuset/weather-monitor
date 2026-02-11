@@ -181,12 +181,6 @@ def analyser_temperatur(værdata: Dict) -> Dict[str, any]:
 def send_slack_varsel(melding: str, lokasjon: str, alvorlighetsgrad: str = "warning"):
     """Sender varsel til Slack via webhook med knapp til Met.no"""
     
-    color_map = {
-        "danger": "#ff0000",
-        "warning": "#ffaa00", 
-        "good": "#00ff00"
-    }
-    
     # Finn koordinater for lokasjonen
     lat, lon = None, None
     for loc in LOCATIONS:
@@ -195,10 +189,8 @@ def send_slack_varsel(melding: str, lokasjon: str, alvorlighetsgrad: str = "warn
             lon = loc["lon"]
             break
     
-    # Lag lenke til Met.no værvarsel
-    metno_url = None
-    if lat and lon:
-        metno_url = f"https://www.yr.no/nb/v%C3%A6rvarsel/daglig-tabell/{lat},{lon}"
+    # Lag yr.no lenke med koordinater (alltid riktig)
+    metno_url = f"https://www.yr.no/nb/v%C3%A6rvarsel/daglig-tabell/{lat},{lon}"
     
     # Bygg Slack-melding med blocks
     blocks = [
@@ -208,12 +200,8 @@ def send_slack_varsel(melding: str, lokasjon: str, alvorlighetsgrad: str = "warn
                 "type": "mrkdwn",
                 "text": f"*⚠️ Værvarsel: {lokasjon}*\n\n{melding}"
             }
-        }
-    ]
-    
-    # Legg til knapper hvis vi har lenke
-    if metno_url:
-        blocks.append({
+        },
+        {
             "type": "actions",
             "elements": [
                 {
@@ -227,15 +215,20 @@ def send_slack_varsel(melding: str, lokasjon: str, alvorlighetsgrad: str = "warn
                     "style": "primary"
                 }
             ]
-        })
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": "Met.no Værvarsel"
+                }
+            ]
+        }
+    ]
     
     payload = {
-        "attachments": [{
-            "color": color_map.get(alvorlighetsgrad, "#ffaa00"),
-            "blocks": blocks,
-            "footer": "Met.no Værvarsel",
-            "ts": int(time.time())
-        }]
+        "blocks": blocks
     }
     
     try:
