@@ -71,14 +71,23 @@ def hent_farevarsler(lat: float, lon: float) -> Optional[Dict]:
         response.raise_for_status()
         data = response.json()
         
-        # Filtrer varsler som gjelder for lokasjon (nærme ≈ 0.5 grader)
+        # Filtrer varsler som gjelder for lokasjon
         relevante_varsler = []
+        sett_varsler = set()  # For å unngå duplikater
+        
         if "features" in data:
             for feature in data["features"]:
-                if "geometry" in feature and feature["geometry"]:
-                    # Sjekk om varslet overlapper med vår lokasjon
-                    # Dette er en forenklet sjekk
-                    relevante_varsler.append(feature)
+                props = feature.get("properties", {})
+                
+                # Sjekk om varslet gjelder for Norge (Norge har county-koder)
+                if props.get("county"):
+                    # Lag en unik nøkkel for varselet
+                    varsel_id = f"{props.get('event', '')}_{props.get('severity', '')}_{props.get('onset', '')}"
+                    
+                    # Bare legg til hvis vi ikke har sett dette varselet før
+                    if varsel_id not in sett_varsler:
+                        sett_varsler.add(varsel_id)
+                        relevante_varsler.append(feature)
         
         return {"features": relevante_varsler} if relevante_varsler else None
     except requests.exceptions.RequestException as e:
@@ -169,6 +178,7 @@ def sjekk_lokasjon(lokasjon: Dict):
     print(f"\n📍 Sjekker {navn}...")
     
     varsler = []
+    har_farevarsler = False
     
     # Hent værdata
     værdata = hent_værdata(lat, lon)
@@ -176,34 +186,79 @@ def sjekk_lokasjon(lokasjon: Dict):
         # Sjekk nedbør
         nedbør = analyser_nedbør(værdata)
         if nedbør["max_per_time"] >= THRESHOLDS["nedbør_mm_per_time"]:
-            varsler.append(f"🌧️ Kraftig nedbør: {nedbør['max_per_time']:.1f} mm/time")
+            varsler.append(f"🌧️ *Kraftig nedbør:* {nedbør['max_per_time']:.1f} mm/time")
         
         if nedbør["total_24t"] >= THRESHOLDS["nedbør_mm_per_dag"]:
-            varsler.append(f"🌧️ Mye nedbør i døgnet: {nedbør['total_24t']:.1f} mm/24t")
+            varsler.append(f"🌧️ *Mye nedbør:* {nedbør['total_24t']:.1f} mm neste 24 timer")
         
         # Sjekk temperatur
         temp = analyser_temperatur(værdata)
         if temp["sving"] >= THRESHOLDS["temp_sving_grader"]:
             varsler.append(
-                f"🌡️ Store temperatursvingninger: {temp['min']:.1f}°C til {temp['max']:.1f}°C "
-                f"(sving: {temp['sving']:.1f}°C)"
+                f"🌡️ *Store temperatursvingninger:* {temp['min']:.1f}°C → {temp['max']:.1f}°C "
+                f"(forskjell: {temp['sving']:.1f}°C)"
             )
     
     # Hent farevarsler
     farevarsler = hent_farevarsler(lat, lon)
     if farevarsler and farevarsler.get("features"):
+        har_farevarsler = True
+        
+        # Oversett og formater farevarsler
+        event_emoji = {
+            "gale": "💨",
+            "wind": "🌬️", 
+            "rain": "🌧️",
+            "snow": "❄️",
+            "ice": "🧊",
+            "icing": "🧊",
+            "avalanches": "⚠️",
+            "forestFire": "🔥",
+            "flood": "🌊",
+            "lightning": "⚡"
+        }
+        
+        severity_map = {
+            "Extreme": "🔴 Ekstrem",
+            "Severe": "🟠 Alvorlig",
+            "Moderate": "🟡 Moderat",
+            "Minor": "🟢 Mindre"
+        }
+        
         for varsel in farevarsler["features"]:
             props = varsel.get("properties", {})
             hendelse = props.get("event", "Ukjent hendelse")
             beskrivelse = props.get("description", "")
             alvorlighet = props.get("severity", "")
             
-            varsler.append(f"⚠️ Farevarsel: {hendelse} ({alvorlighet})\n{beskrivelse}")
+            # Få emoji for hendelse
+            emoji = event_emoji.get(hendelse.lower(), "⚠️")
+            severity_text = severity_map.get(alvorlighet, alvorlighet)
+            
+            # Oversett hendelser
+            hendelse_norsk = {
+                "gale": "Sterk vind/kuling",
+                "wind": "Vind", 
+                "rain": "Kraftig regn",
+                "snow": "Kraftig snø",
+                "ice": "Is/glatt",
+                "icing": "Ising",
+                "avalanches": "Snøskredfare",
+                "forestFire": "Skogbrannfare",
+                "flood": "Flom",
+                "lightning": "Lyn"
+            }.get(hendelse.lower(), hendelse)
+            
+            varsel_tekst = f"{emoji} *{hendelse_norsk}* ({severity_text})"
+            if beskrivelse:
+                varsel_tekst += f"\n   _{beskrivelse}_"
+            
+            varsler.append(varsel_tekst)
     
     # Send varsler til Slack
     if varsler:
         melding = "\n\n".join(varsler)
-        alvorlighetsgrad = "danger" if farevarsler else "warning"
+        alvorlighetsgrad = "danger" if har_farevarsler else "warning"
         send_slack_varsel(melding, navn, alvorlighetsgrad)
     else:
         print(f"  ✓ Ingen varsler for {navn}")
