@@ -115,6 +115,22 @@ HEADERS = {
 
 # ===== HJELPEFUNKSJONER =====
 
+def formater_tidspunkt(iso_tidspunkt):
+    """Formaterer ISO tidspunkt til norsk format"""
+    if not iso_tidspunkt:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso_tidspunkt.replace('Z', '+00:00'))
+        # Konverter til norsk tid (UTC+1 eller UTC+2)
+        # Enkel tilnærming: Legg til 1 time (Norge er UTC+1 vinter, UTC+2 sommer)
+        dt_norsk = dt + timedelta(hours=1)
+        
+        # Formater som "ons 12. feb kl 14:00"
+        ukedag = ["man", "tir", "ons", "tor", "fre", "lør", "søn"][dt_norsk.weekday()]
+        return f"{ukedag} {dt_norsk.day}. {dt_norsk.strftime('%b')} kl {dt_norsk.strftime('%H:%M')}"
+    except:
+        return iso_tidspunkt
+
 def hent_værdata(lat: float, lon: float) -> Optional[Dict]:
     """Henter værdata fra Met.no Locationforecast API"""
     url = f"https://api.met.no/weatherapi/locationforecast/2.0/compact"
@@ -169,14 +185,18 @@ def analyser_nedbør(værdata: Dict) -> Dict[str, any]:
     max_nedbør_time = 0.0
     total_nedbør = 0.0
     timer_med_data = 0
+    max_nedbor_tidspunkt = None
     
     # Gå gjennom ALLE tilgjengelige timepunkter (vanligvis 48-90 timer)
     for entry in timeseries:
+        tidspunkt = entry.get("time")
         details = entry.get("data", {}).get("next_1_hours", {}).get("details", {})
         nedbør = details.get("precipitation_amount", 0.0)
         
         if nedbør is not None:
-            max_nedbør_time = max(max_nedbør_time, nedbør)
+            if nedbør > max_nedbør_time:
+                max_nedbør_time = nedbør
+                max_nedbor_tidspunkt = tidspunkt
             total_nedbør += nedbør
             timer_med_data += 1
     
@@ -188,11 +208,18 @@ def analyser_nedbør(værdata: Dict) -> Dict[str, any]:
         if nedbør is not None:
             total_nedbør_24t += nedbør
     
+    # Finn start og slutt for prognosen
+    start_tid = timeseries[0].get("time") if timeseries else None
+    slutt_tid = timeseries[-1].get("time") if timeseries else None
+    
     return {
         "max_per_time": max_nedbør_time,
+        "max_tidspunkt": max_nedbor_tidspunkt,
         "total_24t": total_nedbør_24t,
         "total_periode": total_nedbør,
-        "timer_dekket": timer_med_data
+        "timer_dekket": timer_med_data,
+        "start_tid": start_tid,
+        "slutt_tid": slutt_tid
     }
 
 
@@ -202,36 +229,58 @@ def analyser_temperatur(værdata: Dict) -> Dict[str, any]:
     
     temperaturer_alle = []
     temperaturer_24t = []
+    min_tid_alle = None
+    max_tid_alle = None
+    min_tid_24t = None
+    max_tid_24t = None
     
     # Samle alle temperaturer
     for i, entry in enumerate(timeseries):
+        tidspunkt = entry.get("time")
         instant = entry.get("data", {}).get("instant", {}).get("details", {})
         temp = instant.get("air_temperature")
+        
         if temp is not None:
-            temperaturer_alle.append(temp)
+            temperaturer_alle.append((temp, tidspunkt))
             if i < 24:
-                temperaturer_24t.append(temp)
+                temperaturer_24t.append((temp, tidspunkt))
     
     if not temperaturer_alle:
         return {"min": 0, "max": 0, "sving": 0, "min_24t": 0, "max_24t": 0, "sving_24t": 0, "timer_dekket": 0}
     
     # Beregn for hele perioden
-    min_temp = min(temperaturer_alle)
-    max_temp = max(temperaturer_alle)
+    min_temp_tuple = min(temperaturer_alle, key=lambda x: x[0])
+    max_temp_tuple = max(temperaturer_alle, key=lambda x: x[0])
+    min_temp = min_temp_tuple[0]
+    max_temp = max_temp_tuple[0]
+    min_tid_alle = min_temp_tuple[1]
+    max_tid_alle = max_temp_tuple[1]
     sving = max_temp - min_temp
     
     # Beregn for 24 timer
-    min_temp_24t = min(temperaturer_24t) if temperaturer_24t else 0
-    max_temp_24t = max(temperaturer_24t) if temperaturer_24t else 0
-    sving_24t = max_temp_24t - min_temp_24t if temperaturer_24t else 0
+    if temperaturer_24t:
+        min_temp_tuple_24t = min(temperaturer_24t, key=lambda x: x[0])
+        max_temp_tuple_24t = max(temperaturer_24t, key=lambda x: x[0])
+        min_temp_24t = min_temp_tuple_24t[0]
+        max_temp_24t = max_temp_tuple_24t[0]
+        min_tid_24t = min_temp_tuple_24t[1]
+        max_tid_24t = max_temp_tuple_24t[1]
+        sving_24t = max_temp_24t - min_temp_24t
+    else:
+        min_temp_24t = max_temp_24t = sving_24t = 0
+        min_tid_24t = max_tid_24t = None
     
     return {
         "min": min_temp,
         "max": max_temp,
         "sving": sving,
+        "min_tid": min_tid_alle,
+        "max_tid": max_tid_alle,
         "min_24t": min_temp_24t,
         "max_24t": max_temp_24t,
         "sving_24t": sving_24t,
+        "min_tid_24t": min_tid_24t,
+        "max_tid_24t": max_tid_24t,
         "timer_dekket": len(temperaturer_alle)
     }
 
@@ -490,6 +539,7 @@ def main():
                 kraftig_nedbor_kommuner.append({
                     "navn": navn,
                     "verdi": nedbør["max_per_time"],
+                    "tidspunkt": nedbør.get("max_tidspunkt"),
                     "lat": lat,
                     "lon": lon
                 })
@@ -498,6 +548,7 @@ def main():
                 mye_nedbor_kommuner.append({
                     "navn": navn,
                     "verdi": nedbør["total_24t"],
+                    "start_tid": nedbør.get("start_tid"),
                     "lat": lat,
                     "lon": lon
                 })
@@ -507,14 +558,29 @@ def main():
             max_sving = max(temp["sving_24t"], temp["sving"])
             
             if max_sving >= THRESHOLDS["temp_sving_grader"]:
-                temp_sving_kommuner.append({
-                    "navn": navn,
-                    "min": temp["min"] if temp["sving"] > temp["sving_24t"] else temp["min_24t"],
-                    "max": temp["max"] if temp["sving"] > temp["sving_24t"] else temp["max_24t"],
-                    "sving": max_sving,
-                    "lat": lat,
-                    "lon": lon
-                })
+                # Bruk tidspunkter fra hele perioden hvis det er størst sving, ellers 24t
+                if temp["sving"] > temp["sving_24t"]:
+                    temp_sving_kommuner.append({
+                        "navn": navn,
+                        "min": temp["min"],
+                        "max": temp["max"],
+                        "sving": temp["sving"],
+                        "min_tid": temp.get("min_tid"),
+                        "max_tid": temp.get("max_tid"),
+                        "lat": lat,
+                        "lon": lon
+                    })
+                else:
+                    temp_sving_kommuner.append({
+                        "navn": navn,
+                        "min": temp["min_24t"],
+                        "max": temp["max_24t"],
+                        "sving": temp["sving_24t"],
+                        "min_tid": temp.get("min_tid_24t"),
+                        "max_tid": temp.get("max_tid_24t"),
+                        "lat": lat,
+                        "lon": lon
+                    })
         
         time.sleep(1)  # Vær høflig mot API-et
     
@@ -554,7 +620,10 @@ def send_gruppert_varsel_nedbor_time(kommuner):
     # Bygg melding
     kommune_liste = []
     for k in kommuner_sortert:
-        kommune_liste.append(f"• *{k['navn']}:* {k['verdi']:.1f} mm/time")
+        tidspunkt_tekst = ""
+        if k.get("tidspunkt"):
+            tidspunkt_tekst = f" ({formater_tidspunkt(k['tidspunkt'])})"
+        kommune_liste.append(f"• *{k['navn']}:* {k['verdi']:.1f} mm/time{tidspunkt_tekst}")
     
     melding = f"🌧️ *Kraftig nedbør varslet*\n\n" + "\n".join(kommune_liste)
     melding += f"\n\n📊 _Terskelverdi: {THRESHOLDS['nedbør_mm_per_time']:.1f} mm/time_"
@@ -579,13 +648,19 @@ def send_gruppert_varsel_nedbor_dogn(kommuner):
     # Sorter etter verdi (høyeste først)
     kommuner_sortert = sorted(kommuner, key=lambda x: x["verdi"], reverse=True)
     
-    # Bygg melding
+    # Bygg melding med tidsperiode
     kommune_liste = []
     for k in kommuner_sortert:
         kommune_liste.append(f"• *{k['navn']}:* {k['verdi']:.1f} mm/24t")
     
     melding = f"🌧️ *Mye nedbør neste døgn*\n\n" + "\n".join(kommune_liste)
-    melding += f"\n\n📊 _Terskelverdi: {THRESHOLDS['nedbør_mm_per_dag']:.1f} mm/24t_"
+    
+    # Legg til tidsperiode hvis tilgjengelig
+    if kommuner_sortert[0].get("start_tid"):
+        start = formater_tidspunkt(kommuner_sortert[0]["start_tid"])
+        melding += f"\n\n🕐 _Fra: {start}_"
+    
+    melding += f"\n📊 _Terskelverdi: {THRESHOLDS['nedbør_mm_per_dag']:.1f} mm/24t_"
     
     # Bruk første kommune som representativ lenke
     send_slack_varsel_gruppert(melding, "Mye nedbør", kommuner_sortert[0]["lat"], kommuner_sortert[0]["lon"])
@@ -610,7 +685,15 @@ def send_gruppert_varsel_temperatur(kommuner):
     # Bygg melding
     kommune_liste = []
     for k in kommuner_sortert:
-        kommune_liste.append(f"• *{k['navn']}:* {k['min']:.1f}°C → {k['max']:.1f}°C (Δ {k['sving']:.1f}°C)")
+        base_tekst = f"• *{k['navn']}:* {k['min']:.1f}°C → {k['max']:.1f}°C (Δ {k['sving']:.1f}°C)"
+        
+        # Legg til tidspunkter hvis tilgjengelig
+        if k.get("min_tid") and k.get("max_tid"):
+            min_tid = formater_tidspunkt(k["min_tid"])
+            max_tid = formater_tidspunkt(k["max_tid"])
+            base_tekst += f"\n   _Lavest: {min_tid}, Høyest: {max_tid}_"
+        
+        kommune_liste.append(base_tekst)
     
     melding = f"🌡️ *Store temperatursvingninger varslet*\n\n" + "\n".join(kommune_liste)
     melding += f"\n\n📊 _Terskelverdi: {THRESHOLDS['temp_sving_grader']:.1f}°C_"
