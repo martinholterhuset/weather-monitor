@@ -14,6 +14,7 @@ from typing import Dict, List, Optional
 import time
 import os
 from pathlib import Path
+import hashlib
 
 # Last inn miljøvariabler fra .env fil (valgfritt)
 try:
@@ -24,6 +25,63 @@ except ImportError:
 
 # ===== KONFIGURASJON =====
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "DIN_SLACK_WEBHOOK_URL_HER")
+
+# Status-fil for å tracke sendte varsler
+STATUS_FILE = os.path.join(os.path.dirname(__file__), ".weather_status.json")
+
+def les_status():
+    """Leser status fra fil"""
+    if os.path.exists(STATUS_FILE):
+        try:
+            with open(STATUS_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def lagre_status(status):
+    """Lagrer status til fil"""
+    try:
+        with open(STATUS_FILE, 'w') as f:
+            json.dump(status, f, indent=2)
+    except Exception as e:
+        print(f"Kunne ikke lagre status: {e}")
+
+def lag_varsel_id(varsel_type, kommuner_data):
+    """Lager unik ID for et varsel basert på type og kommuner"""
+    # Sorter kommuner alfabetisk for konsistent ID
+    if isinstance(kommuner_data, list):
+        kommune_navn = sorted([k["navn"] for k in kommuner_data])
+    else:
+        kommune_navn = [kommuner_data]
+    
+    # Lag hash av type + kommuner
+    data_str = f"{varsel_type}:{','.join(kommune_navn)}"
+    return hashlib.md5(data_str.encode()).hexdigest()
+
+def er_varsel_sendt_nylig(varsel_id, timer=6):
+    """Sjekker om varsel ble sendt de siste X timene"""
+    status = les_status()
+    
+    if varsel_id not in status:
+        return False
+    
+    sendt_tid = datetime.fromisoformat(status[varsel_id])
+    tid_siden = datetime.now() - sendt_tid
+    
+    return tid_siden < timedelta(hours=timer)
+
+def marker_varsel_sendt(varsel_id):
+    """Markerer at et varsel er sendt"""
+    status = les_status()
+    status[varsel_id] = datetime.now().isoformat()
+    
+    # Rydd opp gamle varsler (eldre enn 48 timer)
+    cutoff = datetime.now() - timedelta(hours=48)
+    status = {k: v for k, v in status.items() 
+              if datetime.fromisoformat(v) > cutoff}
+    
+    lagre_status(status)
 
 # Legg til dine destinasjoner med navn, breddegrad og lengdegrad
 # Romerike-kommuner
@@ -300,13 +358,18 @@ def sjekk_lokasjon(lokasjon: Dict):
 
 
 def send_farevarsler_norge():
-    """Sender farevarsler for hele Norge (kun én gang)"""
-    print(f"\n⚠️ Sjekker farevarsler for Norge...")
+    """Sender farevarsler for våre overvåkede kommuner (kun én gang)"""
+    print(f"\n⚠️ Sjekker farevarsler for våre kommuner...")
     
     farevarsler = hent_farevarsler_norge()
     if not farevarsler or not farevarsler.get("features"):
         print(f"  ✓ Ingen farevarsler")
         return
+    
+    # Liste over kommuner vi overvåker
+    overvakede_kommuner = [lok["name"].lower() for lok in LOCATIONS]
+    # Fjern "(Akershus)" fra Nes for matching
+    overvakede_kommuner_clean = [k.replace(" (akershus)", "").strip() for k in overvakede_kommuner]
     
     varsler = []
     
@@ -338,6 +401,23 @@ def send_farevarsler_norge():
         alvorlighet = props.get("severity", "")
         omrade = props.get("area", "")
         
+        # Sjekk om varselet gjelder for en av våre kommuner
+        gjelder_oss = False
+        if omrade:
+            omrade_lower = omrade.lower()
+            for kommune in overvakede_kommuner_clean:
+                if kommune in omrade_lower:
+                    gjelder_oss = True
+                    break
+        
+        # Hvis område ikke er spesifisert eller gjelder hele Akershus/Romerike
+        if not omrade or "akershus" in omrade.lower() or "romerike" in omrade.lower():
+            gjelder_oss = True
+        
+        if not gjelder_oss:
+            print(f"  ⊘ Hopper over varsel for {omrade} (ikke våre kommuner)")
+            continue
+        
         # Få emoji for hendelse
         emoji = event_emoji.get(hendelse.lower(), "⚠️")
         severity_text = severity_map.get(alvorlighet, alvorlighet)
@@ -367,7 +447,9 @@ def send_farevarsler_norge():
     # Send alle farevarsler samlet
     if varsler:
         melding = "\n\n".join(varsler)
-        send_slack_varsel(melding, "Norge - Farevarsler", "danger")
+        send_slack_varsel_gruppert(melding, "Norge - Farevarsler", LOCATIONS[0]["lat"], LOCATIONS[0]["lon"])
+    else:
+        print(f"  ✓ Ingen farevarsler for våre kommuner")
 
 
 def main():
@@ -458,6 +540,12 @@ def main():
 
 def send_gruppert_varsel_nedbor_time(kommuner):
     """Sender gruppert varsel for kraftig nedbør per time"""
+    varsel_id = lag_varsel_id("kraftig_nedbor_time", kommuner)
+    
+    if er_varsel_sendt_nylig(varsel_id, timer=6):
+        print(f"\n⊘ Hopper over kraftig nedbør-varsel (sendt nylig)")
+        return
+    
     print(f"\n🌧️ Sender varsel om kraftig nedbør for {len(kommuner)} kommuner")
     
     # Sorter etter verdi (høyeste først)
@@ -473,10 +561,19 @@ def send_gruppert_varsel_nedbor_time(kommuner):
     
     # Bruk første kommune som representativ lenke
     send_slack_varsel_gruppert(melding, "Kraftig nedbør", kommuner_sortert[0]["lat"], kommuner_sortert[0]["lon"])
+    
+    # Marker som sendt
+    marker_varsel_sendt(varsel_id)
 
 
 def send_gruppert_varsel_nedbor_dogn(kommuner):
     """Sender gruppert varsel for mye nedbør per døgn"""
+    varsel_id = lag_varsel_id("mye_nedbor_dogn", kommuner)
+    
+    if er_varsel_sendt_nylig(varsel_id, timer=6):
+        print(f"\n⊘ Hopper over mye nedbør-varsel (sendt nylig)")
+        return
+    
     print(f"\n🌧️ Sender varsel om mye nedbør for {len(kommuner)} kommuner")
     
     # Sorter etter verdi (høyeste først)
@@ -492,10 +589,19 @@ def send_gruppert_varsel_nedbor_dogn(kommuner):
     
     # Bruk første kommune som representativ lenke
     send_slack_varsel_gruppert(melding, "Mye nedbør", kommuner_sortert[0]["lat"], kommuner_sortert[0]["lon"])
+    
+    # Marker som sendt
+    marker_varsel_sendt(varsel_id)
 
 
 def send_gruppert_varsel_temperatur(kommuner):
     """Sender gruppert varsel for temperatursvingninger"""
+    varsel_id = lag_varsel_id("temperatur_sving", kommuner)
+    
+    if er_varsel_sendt_nylig(varsel_id, timer=6):
+        print(f"\n⊘ Hopper over temperaturvarsel (sendt nylig)")
+        return
+    
     print(f"\n🌡️ Sender varsel om temperatursvingninger for {len(kommuner)} kommuner")
     
     # Sorter etter sving (største først)
@@ -511,6 +617,9 @@ def send_gruppert_varsel_temperatur(kommuner):
     
     # Bruk første kommune som representativ lenke
     send_slack_varsel_gruppert(melding, "Temperatursvingninger", kommuner_sortert[0]["lat"], kommuner_sortert[0]["lon"])
+    
+    # Marker som sendt
+    marker_varsel_sendt(varsel_id)
 
 
 def send_slack_varsel_gruppert(melding: str, tittel: str, lat: float, lon: float):
