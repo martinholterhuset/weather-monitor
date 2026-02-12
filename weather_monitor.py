@@ -45,8 +45,8 @@ LOCATIONS = [
 # Terskelverdier for varsling
 THRESHOLDS = {
     "nedbør_mm_per_time": float(os.getenv("THRESHOLD_PRECIPITATION_HOURLY", "5.0")),
-    "nedbør_mm_per_dag": float(os.getenv("THRESHOLD_PRECIPITATION_DAILY", "20.0")),
-    "temp_sving_grader": float(os.getenv("THRESHOLD_TEMPERATURE_SWING", "10.0")),
+    "nedbør_mm_per_dag": float(os.getenv("THRESHOLD_PRECIPITATION_DAILY", "30.0")),
+    "temp_sving_grader": float(os.getenv("THRESHOLD_TEMPERATURE_SWING", "15.0")),
 }
 
 # User-Agent er påkrevd av Met.no API
@@ -385,13 +385,185 @@ def main():
     send_farevarsler_norge()
     time.sleep(1)
     
-    # Deretter sjekk værvarsler per lokasjon
+    # Samle værvarsler per type
+    kraftig_nedbor_kommuner = []
+    mye_nedbor_kommuner = []
+    temp_sving_kommuner = []
+    
+    # Sjekk alle kommuner
     for lokasjon in LOCATIONS:
-        sjekk_lokasjon(lokasjon)
+        navn = lokasjon["name"]
+        lat = lokasjon["lat"]
+        lon = lokasjon["lon"]
+        
+        print(f"\n📍 Sjekker {navn}...")
+        
+        # Hent værdata
+        værdata = hent_værdata(lat, lon)
+        if værdata:
+            # Sjekk nedbør
+            nedbør = analyser_nedbør(værdata)
+            
+            if nedbør["max_per_time"] >= THRESHOLDS["nedbør_mm_per_time"]:
+                kraftig_nedbor_kommuner.append({
+                    "navn": navn,
+                    "verdi": nedbør["max_per_time"],
+                    "lat": lat,
+                    "lon": lon
+                })
+            
+            if nedbør["total_24t"] >= THRESHOLDS["nedbør_mm_per_dag"]:
+                mye_nedbor_kommuner.append({
+                    "navn": navn,
+                    "verdi": nedbør["total_24t"],
+                    "lat": lat,
+                    "lon": lon
+                })
+            
+            # Sjekk temperatur
+            temp = analyser_temperatur(værdata)
+            max_sving = max(temp["sving_24t"], temp["sving"])
+            
+            if max_sving >= THRESHOLDS["temp_sving_grader"]:
+                temp_sving_kommuner.append({
+                    "navn": navn,
+                    "min": temp["min"] if temp["sving"] > temp["sving_24t"] else temp["min_24t"],
+                    "max": temp["max"] if temp["sving"] > temp["sving_24t"] else temp["max_24t"],
+                    "sving": max_sving,
+                    "lat": lat,
+                    "lon": lon
+                })
+        
         time.sleep(1)  # Vær høflig mot API-et
+    
+    # Send grupperte varsler
+    if kraftig_nedbor_kommuner:
+        send_gruppert_varsel_nedbor_time(kraftig_nedbor_kommuner)
+        time.sleep(1)
+    
+    if mye_nedbor_kommuner:
+        send_gruppert_varsel_nedbor_dogn(mye_nedbor_kommuner)
+        time.sleep(1)
+    
+    if temp_sving_kommuner:
+        send_gruppert_varsel_temperatur(temp_sving_kommuner)
+        time.sleep(1)
+    
+    if not kraftig_nedbor_kommuner and not mye_nedbor_kommuner and not temp_sving_kommuner:
+        print("\n✓ Ingen værvarsler for noen kommuner")
     
     print("\n✓ Ferdig!")
     print("=" * 60)
+
+
+def send_gruppert_varsel_nedbor_time(kommuner):
+    """Sender gruppert varsel for kraftig nedbør per time"""
+    print(f"\n🌧️ Sender varsel om kraftig nedbør for {len(kommuner)} kommuner")
+    
+    # Sorter etter verdi (høyeste først)
+    kommuner_sortert = sorted(kommuner, key=lambda x: x["verdi"], reverse=True)
+    
+    # Bygg melding
+    kommune_liste = []
+    for k in kommuner_sortert:
+        kommune_liste.append(f"• *{k['navn']}:* {k['verdi']:.1f} mm/time")
+    
+    melding = f"🌧️ *Kraftig nedbør varslet*\n\n" + "\n".join(kommune_liste)
+    melding += f"\n\n📊 _Terskelverdi: {THRESHOLDS['nedbør_mm_per_time']:.1f} mm/time_"
+    
+    # Bruk første kommune som representativ lenke
+    send_slack_varsel_gruppert(melding, "Kraftig nedbør", kommuner_sortert[0]["lat"], kommuner_sortert[0]["lon"])
+
+
+def send_gruppert_varsel_nedbor_dogn(kommuner):
+    """Sender gruppert varsel for mye nedbør per døgn"""
+    print(f"\n🌧️ Sender varsel om mye nedbør for {len(kommuner)} kommuner")
+    
+    # Sorter etter verdi (høyeste først)
+    kommuner_sortert = sorted(kommuner, key=lambda x: x["verdi"], reverse=True)
+    
+    # Bygg melding
+    kommune_liste = []
+    for k in kommuner_sortert:
+        kommune_liste.append(f"• *{k['navn']}:* {k['verdi']:.1f} mm/24t")
+    
+    melding = f"🌧️ *Mye nedbør neste døgn*\n\n" + "\n".join(kommune_liste)
+    melding += f"\n\n📊 _Terskelverdi: {THRESHOLDS['nedbør_mm_per_dag']:.1f} mm/24t_"
+    
+    # Bruk første kommune som representativ lenke
+    send_slack_varsel_gruppert(melding, "Mye nedbør", kommuner_sortert[0]["lat"], kommuner_sortert[0]["lon"])
+
+
+def send_gruppert_varsel_temperatur(kommuner):
+    """Sender gruppert varsel for temperatursvingninger"""
+    print(f"\n🌡️ Sender varsel om temperatursvingninger for {len(kommuner)} kommuner")
+    
+    # Sorter etter sving (største først)
+    kommuner_sortert = sorted(kommuner, key=lambda x: x["sving"], reverse=True)
+    
+    # Bygg melding
+    kommune_liste = []
+    for k in kommuner_sortert:
+        kommune_liste.append(f"• *{k['navn']}:* {k['min']:.1f}°C → {k['max']:.1f}°C (Δ {k['sving']:.1f}°C)")
+    
+    melding = f"🌡️ *Store temperatursvingninger varslet*\n\n" + "\n".join(kommune_liste)
+    melding += f"\n\n📊 _Terskelverdi: {THRESHOLDS['temp_sving_grader']:.1f}°C_"
+    
+    # Bruk første kommune som representativ lenke
+    send_slack_varsel_gruppert(melding, "Temperatursvingninger", kommuner_sortert[0]["lat"], kommuner_sortert[0]["lon"])
+
+
+def send_slack_varsel_gruppert(melding: str, tittel: str, lat: float, lon: float):
+    """Sender gruppert varsel til Slack"""
+    
+    # Lag yr.no lenke med koordinater
+    metno_url = f"https://www.yr.no/nb/v%C3%A6rvarsel/daglig-tabell/{lat},{lon}"
+    
+    # Bygg Slack-melding med blocks
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*⚠️ Værvarsel: {tittel}*\n\n{melding}"
+            }
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Se værvarsel på yr.no",
+                        "emoji": True
+                    },
+                    "url": metno_url,
+                    "style": "primary"
+                }
+            ]
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": "Met.no Værvarsel"
+                }
+            ]
+        }
+    ]
+    
+    payload = {
+        "blocks": blocks
+    }
+    
+    try:
+        response = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=10)
+        response.raise_for_status()
+        print(f"✓ Gruppert varsel sendt til Slack: {tittel}")
+    except requests.exceptions.RequestException as e:
+        print(f"✗ Feil ved sending til Slack: {e}")
 
 
 if __name__ == "__main__":
