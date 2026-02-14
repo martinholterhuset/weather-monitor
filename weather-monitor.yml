@@ -2,8 +2,8 @@ name: Værvarsel Monitor
 
 on:
   schedule:
-    # Kjører hver 6. time (00:00, 06:00, 12:00, 18:00 UTC)
-    - cron: '0 */6 * * *'
+    # Kjører hver dag kl 09:00 UTC (10:00/11:00 norsk tid)
+    - cron: '0 9 * * *'
   
   # Tillat manuell kjøring fra Actions-fanen
   workflow_dispatch:
@@ -31,7 +31,7 @@ jobs:
         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         USER_EMAIL: ${{ secrets.USER_EMAIL }}
         THRESHOLD_PRECIPITATION_HOURLY: ${{ vars.THRESHOLD_PRECIPITATION_HOURLY || '5.0' }}
-        THRESHOLD_PRECIPITATION_DAILY: ${{ vars.THRESHOLD_PRECIPITATION_DAILY || '30.0' }}
-        THRESHOLD_TEMPERATURE_SWING: ${{ vars.THRESHOLD_TEMPERATURE_SWING || '15.0' }}
+        THRESHOLD_PRECIPITATION_DAILY: ${{ vars.THRESHOLD_PRECIPITATION_DAILY || '20.0' }}
+        THRESHOLD_TEMPERATURE_SWING: ${{ vars.THRESHOLD_TEMPERATURE_SWING || '10.0' }}
       run: |
         python weather_monitor.py
